@@ -1,0 +1,18 @@
+[package]
+name = "tracing-otel-init"
+version = "0.1.0"
+edition = "2021"
+description = "Opinionated OpenTelemetry tracing initialization with OTLP export"
+license = "MIT"
+
+[dependencies]
+tracing = { version = "0.1.41", features = ["log"] }
+tracing-subscriber = { version = "0.3.19", features = ["chrono", "env-filter", "json", "fmt", "std"] }
+tracing-opentelemetry = { version = "0.31.0", features = ["metrics"] }
+opentelemetry = { version = "0.30.0", features = ["trace", "logs", "metrics"] }
+opentelemetry-otlp = { version = "0.30.0", features = ["trace", "logs", "metrics", "http-proto", "reqwest-blocking-client"] }
+opentelemetry_sdk = { version = "0.30.0", features = ["rt-tokio", "trace", "logs", "metrics"] }
+tracing-appender = "0.2.3"
+tracing-error = "0.2.1"
+tracing-panic = "0.1.2"
+thiserror = "2"
