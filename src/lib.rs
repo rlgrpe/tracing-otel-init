@@ -94,6 +94,10 @@ pub struct OtelGuard {
 impl OtelGuard {
     /// Flushes all pending telemetry data.
     pub fn shutdown(&self) {
+        self.flush_all();
+    }
+
+    fn flush_all(&self) {
         if let Err(e) = self.logger.force_flush() {
             eprintln!("Logger flush error: {e:?}")
         }
@@ -103,6 +107,12 @@ impl OtelGuard {
         if let Err(e) = self.metrics.force_flush() {
             eprintln!("Metrics flush error: {e:?}")
         }
+    }
+}
+
+impl Drop for OtelGuard {
+    fn drop(&mut self) {
+        self.flush_all();
     }
 }
 
@@ -133,14 +143,16 @@ fn build_filter(level: &str, directives: &[String]) -> EnvFilter {
     ];
 
     for directive in default_directives {
-        if let Ok(d) = directive.parse() {
-            filter = filter.add_directive(d);
+        match directive.parse() {
+            Ok(d) => filter = filter.add_directive(d),
+            Err(e) => eprintln!("Invalid default filter directive '{directive}': {e}"),
         }
     }
 
     for directive in directives {
-        if let Ok(d) = directive.parse() {
-            filter = filter.add_directive(d);
+        match directive.parse() {
+            Ok(d) => filter = filter.add_directive(d),
+            Err(e) => eprintln!("Invalid filter directive '{directive}': {e}"),
         }
     }
 
@@ -362,6 +374,7 @@ impl OtelConfigBuilder {
         self
     }
 
+    #[must_use]
     pub fn build(self) -> OtelConfig {
         self.config
     }

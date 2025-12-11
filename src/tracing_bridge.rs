@@ -1,5 +1,6 @@
 use opentelemetry::logs::{AnyValue, LogRecord, Logger, LoggerProvider, Severity};
 use opentelemetry::{Array, Key, Value};
+use std::marker::PhantomData;
 use tracing::field::Visit;
 use tracing::Level;
 use tracing_subscriber::layer::Context;
@@ -54,16 +55,42 @@ impl<'a, LR: LogRecord> EventVisitor<'a, LR> {
     }
 }
 
+impl<LR: LogRecord> EventVisitor<'_, LR> {
+    /// Record a large integer value, converting to i64 if possible, otherwise to string.
+    fn record_large_int<T>(&mut self, field: &tracing::field::Field, value: T)
+    where
+        T: TryInto<i64> + Copy + std::fmt::Debug,
+    {
+        if is_duplicated_metadata(field.name()) {
+            return;
+        }
+        if let Ok(signed) = value.try_into() {
+            self.log_record
+                .add_attribute(Key::new(field.name()), AnyValue::from(signed));
+        } else {
+            self.log_record
+                .add_attribute(Key::new(field.name()), AnyValue::from(format!("{value:?}")));
+        }
+    }
+}
+
 impl<LR: LogRecord> Visit for EventVisitor<'_, LR> {
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
         if is_duplicated_metadata(field.name()) {
             return;
         }
+        let formatted = format!("{value:?}");
         if field.name() == "message" {
-            self.log_record.set_body(format!("{:?}", value).into());
+            // Strip surrounding quotes if this is a simple string debug repr
+            let body = if formatted.starts_with('"') && formatted.ends_with('"') && formatted.len() >= 2 {
+                formatted[1..formatted.len() - 1].to_string()
+            } else {
+                formatted
+            };
+            self.log_record.set_body(body.into());
         } else {
             self.log_record
-                .add_attribute(Key::new(field.name()), AnyValue::from(format!("{value:?}")));
+                .add_attribute(Key::new(field.name()), AnyValue::from(formatted));
         }
     }
 
@@ -114,42 +141,15 @@ impl<LR: LogRecord> Visit for EventVisitor<'_, LR> {
     }
 
     fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
-        if is_duplicated_metadata(field.name()) {
-            return;
-        }
-        if let Ok(signed) = i64::try_from(value) {
-            self.log_record
-                .add_attribute(Key::new(field.name()), AnyValue::from(signed));
-        } else {
-            self.log_record
-                .add_attribute(Key::new(field.name()), AnyValue::from(format!("{value:?}")));
-        }
+        self.record_large_int(field, value);
     }
 
     fn record_i128(&mut self, field: &tracing::field::Field, value: i128) {
-        if is_duplicated_metadata(field.name()) {
-            return;
-        }
-        if let Ok(signed) = i64::try_from(value) {
-            self.log_record
-                .add_attribute(Key::new(field.name()), AnyValue::from(signed));
-        } else {
-            self.log_record
-                .add_attribute(Key::new(field.name()), AnyValue::from(format!("{value:?}")));
-        }
+        self.record_large_int(field, value);
     }
 
     fn record_u128(&mut self, field: &tracing::field::Field, value: u128) {
-        if is_duplicated_metadata(field.name()) {
-            return;
-        }
-        if let Ok(signed) = i64::try_from(value) {
-            self.log_record
-                .add_attribute(Key::new(field.name()), AnyValue::from(signed));
-        } else {
-            self.log_record
-                .add_attribute(Key::new(field.name()), AnyValue::from(format!("{value:?}")));
-        }
+        self.record_large_int(field, value);
     }
 }
 
@@ -163,7 +163,7 @@ where
     L: Logger + Send + Sync,
 {
     logger: L,
-    _phantom: std::marker::PhantomData<P>,
+    _phantom: PhantomData<fn() -> P>,
 }
 
 impl<P, L> OtelTracingBridge<P, L>
@@ -173,8 +173,8 @@ where
 {
     pub fn new(provider: &P) -> Self {
         Self {
-            logger: provider.logger(""),
-            _phantom: Default::default(),
+            logger: provider.logger(env!("CARGO_PKG_NAME")),
+            _phantom: PhantomData,
         }
     }
 }
