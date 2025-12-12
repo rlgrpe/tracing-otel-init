@@ -18,7 +18,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag="v.0.1.0" }
+tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag="v0.1.0" }
 tracing = "0.1"
 ```
 
