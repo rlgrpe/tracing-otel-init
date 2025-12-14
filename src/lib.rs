@@ -5,10 +5,35 @@ pub use tracing_bridge::OtelTracingBridge;
 use opentelemetry::{global, trace::TracerProvider as _, KeyValue};
 use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter, WithExportConfig};
 use opentelemetry_sdk::logs::SdkLoggerProvider;
-use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider, Temporality};
+use opentelemetry_sdk::metrics::{Instrument, PeriodicReader, SdkMeterProvider, Stream, Temporality};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use opentelemetry_sdk::Resource;
+
+/// Type alias for a metric view function.
+///
+/// A view is a function that takes an instrument and optionally returns a modified stream
+/// configuration for that instrument. This is commonly used for customizing histogram buckets.
+///
+/// # Example
+/// ```ignore
+/// use opentelemetry_sdk::metrics::{Aggregation, Instrument, Stream};
+///
+/// fn my_histogram_view(instrument: &Instrument) -> Option<Stream> {
+///     if instrument.name() == "http.client.duration" {
+///         Some(Stream::builder()
+///             .with_aggregation(Aggregation::ExplicitBucketHistogram {
+///                 boundaries: vec![0.1, 0.5, 1.0, 2.0, 5.0, 10.0],
+///                 record_min_max: false,
+///             })
+///             .build()
+///             .unwrap())
+///     } else {
+///         None
+///     }
+/// }
+/// ```
+pub type MetricView = Box<dyn Fn(&Instrument) -> Option<Stream> + Send + Sync + 'static>;
 use std::time::Duration;
 use tracing_appender::rolling;
 use tracing_error::ErrorLayer;
@@ -187,7 +212,10 @@ fn init_otlp_tracer(config: &OtelConfig) -> Result<SdkTracerProvider, OtelInitEr
         .build())
 }
 
-fn init_otlp_metrics(config: &OtelConfig) -> Result<SdkMeterProvider, OtelInitError> {
+fn init_otlp_metrics(
+    config: &OtelConfig,
+    views: Vec<MetricView>,
+) -> Result<SdkMeterProvider, OtelInitError> {
     let metrics_url = format!("{}/v1/metrics", config.otlp_endpoint);
     let metrics_exporter = MetricExporter::builder()
         .with_http()
@@ -200,10 +228,15 @@ fn init_otlp_metrics(config: &OtelConfig) -> Result<SdkMeterProvider, OtelInitEr
         .with_interval(Duration::from_secs(config.metrics_interval_secs))
         .build();
 
-    Ok(SdkMeterProvider::builder()
+    let mut provider_builder = SdkMeterProvider::builder()
         .with_resource(build_resource(config))
-        .with_reader(reader)
-        .build())
+        .with_reader(reader);
+
+    for view in views {
+        provider_builder = provider_builder.with_view(view);
+    }
+
+    Ok(provider_builder.build())
 }
 
 /// Initialize the tracing subscriber with OpenTelemetry integration.
@@ -219,7 +252,54 @@ fn init_otlp_metrics(config: &OtelConfig) -> Result<SdkMeterProvider, OtelInitEr
 ///
 /// Returns an `OtelGuard` that should be kept alive for the application lifetime.
 /// Call `guard.shutdown()` before exit to flush pending telemetry.
+///
+/// For custom histogram bucket boundaries or other metric views, use
+/// [`init_tracing_with_views`] instead.
 pub fn init_tracing(config: OtelConfig) -> Result<OtelGuard, OtelInitError> {
+    init_tracing_with_views(config, vec![])
+}
+
+/// Initialize the tracing subscriber with OpenTelemetry integration and custom metric views.
+///
+/// This is the same as [`init_tracing`] but allows you to pass custom metric views
+/// for customizing histogram bucket boundaries or other aggregation settings.
+///
+/// # Example
+/// ```ignore
+/// use tracing_otel_init::{OtelConfigBuilder, init_tracing_with_views, MetricView};
+/// use opentelemetry_sdk::metrics::{Aggregation, Instrument, Stream};
+///
+/// fn histogram_view(name: &'static str, buckets: &'static [f64]) -> MetricView {
+///     Box::new(move |i: &Instrument| {
+///         (i.name() == name).then(|| {
+///             Stream::builder()
+///                 .with_aggregation(Aggregation::ExplicitBucketHistogram {
+///                     boundaries: buckets.to_vec(),
+///                     record_min_max: false,
+///                 })
+///                 .build()
+///                 .expect("valid stream")
+///         })
+///     })
+/// }
+///
+/// const HTTP_BUCKETS: &[f64] = &[0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0];
+///
+/// let views = vec![
+///     histogram_view("http.client.duration", HTTP_BUCKETS),
+///     histogram_view("http.client.ttfb", HTTP_BUCKETS),
+/// ];
+///
+/// let config = OtelConfigBuilder::new()
+///     .service_name("my-service")
+///     .build();
+///
+/// let guard = init_tracing_with_views(config, views)?;
+/// ```
+pub fn init_tracing_with_views(
+    config: OtelConfig,
+    metric_views: Vec<MetricView>,
+) -> Result<OtelGuard, OtelInitError> {
     // Logger (logs)
     let otlp_logger_provider = init_otlp_logger(&config)?;
     let otlp_logger_filter = build_filter(&config.logger_level, &config.filter_directives);
@@ -233,8 +313,8 @@ pub fn init_tracing(config: OtelConfig) -> Result<OtelGuard, OtelInitError> {
     let otlp_tracer_layer = OpenTelemetryLayer::new(otlp_tracer).with_filter(otlp_tracer_filter);
     global::set_text_map_propagator(TraceContextPropagator::new());
 
-    // Metrics
-    let otlp_metrics_provider = init_otlp_metrics(&config)?;
+    // Metrics (with optional views)
+    let otlp_metrics_provider = init_otlp_metrics(&config, metric_views)?;
     let otlp_metrics_layer = MetricsLayer::new(otlp_metrics_provider.clone());
     global::set_meter_provider(otlp_metrics_provider.clone());
 
