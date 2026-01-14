@@ -11,6 +11,7 @@ Opinionated OpenTelemetry tracing initialization for Rust applications with OTLP
 - **File Logging** - Optional JSON logs with daily rotation
 - **Panic Capture** - Automatic panic tracing
 - **Span Context** - Log-trace correlation via trace_id/span_id
+- **rustls TLS** - Optional pure Rust TLS implementation (via `rustls` feature)
 
 ## Installation
 
@@ -18,7 +19,17 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag="v.0.1.0" }
+tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag = "v0.1.2" }
+tracing = "0.1"
+```
+
+### With rustls TLS
+
+To use rustls instead of the system's native TLS implementation:
+
+```toml
+[dependencies]
+tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag = "v0.1.2", features = ["rustls"] }
 tracing = "0.1"
 ```
 
