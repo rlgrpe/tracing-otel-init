@@ -19,7 +19,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag = "v0.1.2" }
+tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag = "v0.1.3" }
 tracing = "0.1"
 ```
 
@@ -29,7 +29,7 @@ To use rustls instead of the system's native TLS implementation:
 
 ```toml
 [dependencies]
-tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag = "v0.1.2", features = ["rustls"] }
+tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag = "v0.1.3", features = ["rustls"] }
 tracing = "0.1"
 ```
 

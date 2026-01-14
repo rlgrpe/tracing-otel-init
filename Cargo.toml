@@ -1,13 +1,13 @@
 [package]
 name = "tracing-otel-init"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 description = "Opinionated OpenTelemetry tracing initialization with OTLP export"
 license = "MIT"
 
 [features]
 default = []
-rustls = ["opentelemetry-otlp/reqwest-rustls"]
+rustls-tls = ["opentelemetry-otlp/reqwest-rustls"]
 
 [dependencies]
 tracing = { version = "0.1.41", features = ["log"] }
