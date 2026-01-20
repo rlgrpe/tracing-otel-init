@@ -85,6 +85,8 @@ pub struct OtelConfig {
     pub filter_directives: Vec<String>,
     /// Metrics export interval in seconds (default: 1)
     pub metrics_interval_secs: u64,
+    /// Custom resource attributes (e.g., host.name, cloud.provider)
+    pub resource_attributes: Vec<KeyValue>,
 }
 
 impl Default for OtelConfig {
@@ -103,6 +105,7 @@ impl Default for OtelConfig {
             log_file_prefix: "app.log".to_string(),
             filter_directives: vec![],
             metrics_interval_secs: 1,
+            resource_attributes: vec![],
         }
     }
 }
@@ -142,13 +145,16 @@ impl Drop for OtelGuard {
 }
 
 fn build_resource(config: &OtelConfig) -> Resource {
+    let mut attributes = vec![
+        KeyValue::new("service.instance.id", config.service_instance_id.clone()),
+        KeyValue::new("service.version", config.service_version.clone()),
+        KeyValue::new("deployment.environment", config.environment.clone()),
+    ];
+    attributes.extend(config.resource_attributes.clone());
+
     Resource::builder()
         .with_service_name(config.service_name.clone())
-        .with_attributes([
-            KeyValue::new("service.instance.id", config.service_instance_id.clone()),
-            KeyValue::new("service.version", config.service_version.clone()),
-            KeyValue::new("deployment.environment", config.environment.clone()),
-        ])
+        .with_attributes(attributes)
         .build()
 }
 
@@ -451,6 +457,45 @@ impl OtelConfigBuilder {
 
     pub fn metrics_interval_secs(mut self, secs: u64) -> Self {
         self.config.metrics_interval_secs = secs;
+        self
+    }
+
+    /// Add a single custom resource attribute.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let config = OtelConfigBuilder::new()
+    ///     .service_name("my-service")
+    ///     .resource_attribute("host.name", "server-01")
+    ///     .resource_attribute("cloud.provider", "aws")
+    ///     .build();
+    /// ```
+    pub fn resource_attribute(
+        mut self,
+        key: impl Into<opentelemetry::Key>,
+        value: impl Into<opentelemetry::Value>,
+    ) -> Self {
+        self.config.resource_attributes.push(KeyValue::new(key, value));
+        self
+    }
+
+    /// Add multiple custom resource attributes at once.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use opentelemetry::KeyValue;
+    ///
+    /// let config = OtelConfigBuilder::new()
+    ///     .service_name("my-service")
+    ///     .resource_attributes([
+    ///         KeyValue::new("host.name", "server-01"),
+    ///         KeyValue::new("cloud.provider", "aws"),
+    ///         KeyValue::new("cloud.region", "us-east-1"),
+    ///     ])
+    ///     .build();
+    /// ```
+    pub fn resource_attributes(mut self, attrs: impl IntoIterator<Item = KeyValue>) -> Self {
+        self.config.resource_attributes.extend(attrs);
         self
     }
 
