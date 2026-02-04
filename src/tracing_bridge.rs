@@ -1,6 +1,7 @@
 use opentelemetry::logs::{AnyValue, LogRecord, Logger, LoggerProvider, Severity};
 use opentelemetry::{Array, Key, Value};
 use std::marker::PhantomData;
+use std::time::SystemTime;
 use tracing::field::Visit;
 use tracing::Level;
 use tracing_subscriber::layer::Context;
@@ -193,6 +194,10 @@ where
         let name = metadata.name();
 
         let mut log_record = self.logger.create_log_record();
+
+        // Set timestamp for log ordering and trace correlation
+        // observed_timestamp is set by the Collector when it receives the log
+        log_record.set_timestamp(SystemTime::now());
 
         log_record.set_target(target);
         log_record.set_event_name(name);
