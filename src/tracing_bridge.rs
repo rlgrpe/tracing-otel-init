@@ -82,11 +82,12 @@ impl<LR: LogRecord> Visit for EventVisitor<'_, LR> {
         let formatted = format!("{value:?}");
         if field.name() == "message" {
             // Strip surrounding quotes if this is a simple string debug repr
-            let body = if formatted.starts_with('"') && formatted.ends_with('"') && formatted.len() >= 2 {
-                formatted[1..formatted.len() - 1].to_string()
-            } else {
-                formatted
-            };
+            let body =
+                if formatted.starts_with('"') && formatted.ends_with('"') && formatted.len() >= 2 {
+                    formatted[1..formatted.len() - 1].to_string()
+                } else {
+                    formatted
+                };
             self.log_record.set_body(body.into());
         } else {
             self.log_record
