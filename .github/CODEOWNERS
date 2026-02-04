@@ -1,0 +1,10 @@
+# Default code owner for everything
+* @rlgrpe
+
+# Rust source code
+/src/ @rlgrpe
+/examples/ @rlgrpe
+Cargo.toml @rlgrpe
+
+# CI/CD configuration
+/.github/ @rlgrpe
