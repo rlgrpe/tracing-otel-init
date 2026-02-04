@@ -1,39 +1,19 @@
 mod tracing_bridge;
 
+pub use opentelemetry::KeyValue;
 pub use tracing_bridge::OtelTracingBridge;
 
-use opentelemetry::{global, trace::TracerProvider as _, KeyValue};
+use opentelemetry::{global, trace::TracerProvider as _};
 use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter, WithExportConfig};
 use opentelemetry_sdk::logs::SdkLoggerProvider;
-use opentelemetry_sdk::metrics::{Instrument, PeriodicReader, SdkMeterProvider, Stream, Temporality};
+use opentelemetry_sdk::metrics::{
+    Instrument, PeriodicReader, SdkMeterProvider, Stream, Temporality,
+};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
-use opentelemetry_sdk::trace::SdkTracerProvider;
+use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
 use opentelemetry_sdk::Resource;
-
-/// Type alias for a metric view function.
-///
-/// A view is a function that takes an instrument and optionally returns a modified stream
-/// configuration for that instrument. This is commonly used for customizing histogram buckets.
-///
-/// # Example
-/// ```ignore
-/// use opentelemetry_sdk::metrics::{Aggregation, Instrument, Stream};
-///
-/// fn my_histogram_view(instrument: &Instrument) -> Option<Stream> {
-///     if instrument.name() == "http.client.duration" {
-///         Some(Stream::builder()
-///             .with_aggregation(Aggregation::ExplicitBucketHistogram {
-///                 boundaries: vec![0.1, 0.5, 1.0, 2.0, 5.0, 10.0],
-///                 record_min_max: false,
-///             })
-///             .build()
-///             .unwrap())
-///     } else {
-///         None
-///     }
-/// }
-/// ```
-pub type MetricView = Box<dyn Fn(&Instrument) -> Option<Stream> + Send + Sync + 'static>;
+use std::fmt;
+use std::str::FromStr;
 use std::time::Duration;
 use tracing_appender::rolling;
 use tracing_error::ErrorLayer;
@@ -41,10 +21,14 @@ use tracing_opentelemetry::{MetricsLayer, OpenTelemetryLayer};
 use tracing_panic::panic_hook;
 use tracing_subscriber::fmt::format::{FmtSpan, JsonFields};
 use tracing_subscriber::fmt::time::ChronoUtc;
-use tracing_subscriber::fmt::{self, format};
+use tracing_subscriber::fmt::{format, Layer as FmtLayer};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{registry, EnvFilter, Layer};
+
+// ============================================================================
+// Error types
+// ============================================================================
 
 #[derive(Debug, thiserror::Error)]
 pub enum OtelInitError {
@@ -54,7 +38,175 @@ pub enum OtelInitError {
     TraceExporter(#[source] opentelemetry_otlp::ExporterBuildError),
     #[error("Failed to initialize OTLP metrics exporter")]
     MetricsExporter(#[source] opentelemetry_otlp::ExporterBuildError),
+    #[error("Configuration validation failed: {0}")]
+    Validation(String),
 }
+
+// ============================================================================
+// Log level enum
+// ============================================================================
+
+/// Log level for tracing layers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LogLevel {
+    Trace,
+    Debug,
+    #[default]
+    Info,
+    Warn,
+    Error,
+    Off,
+}
+
+impl LogLevel {
+    fn as_str(&self) -> &'static str {
+        match self {
+            LogLevel::Trace => "trace",
+            LogLevel::Debug => "debug",
+            LogLevel::Info => "info",
+            LogLevel::Warn => "warn",
+            LogLevel::Error => "error",
+            LogLevel::Off => "off",
+        }
+    }
+}
+
+impl fmt::Display for LogLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl FromStr for LogLevel {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "trace" => Ok(LogLevel::Trace),
+            "debug" => Ok(LogLevel::Debug),
+            "info" => Ok(LogLevel::Info),
+            "warn" | "warning" => Ok(LogLevel::Warn),
+            "error" => Ok(LogLevel::Error),
+            "off" => Ok(LogLevel::Off),
+            _ => Err(format!("Invalid log level: {s}")),
+        }
+    }
+}
+
+// ============================================================================
+// Transport protocol
+// ============================================================================
+
+/// OTLP transport protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OtlpProtocol {
+    /// HTTP/protobuf (default)
+    #[default]
+    Http,
+    /// gRPC (requires `grpc` feature)
+    #[cfg(feature = "grpc")]
+    Grpc,
+}
+
+// ============================================================================
+// Sampling configuration
+// ============================================================================
+
+/// Trace sampling strategy.
+#[derive(Debug, Clone, Default)]
+pub enum SamplingStrategy {
+    /// Always sample all traces (default)
+    #[default]
+    AlwaysOn,
+    /// Never sample traces
+    AlwaysOff,
+    /// Sample traces based on parent decision
+    ParentBased,
+    /// Sample a ratio of traces (0.0 to 1.0)
+    TraceIdRatio(f64),
+    /// Parent-based with trace ID ratio fallback
+    ParentBasedTraceIdRatio(f64),
+}
+
+impl SamplingStrategy {
+    fn to_sampler(&self) -> Sampler {
+        match self {
+            SamplingStrategy::AlwaysOn => Sampler::AlwaysOn,
+            SamplingStrategy::AlwaysOff => Sampler::AlwaysOff,
+            SamplingStrategy::ParentBased => Sampler::ParentBased(Box::new(Sampler::AlwaysOn)),
+            SamplingStrategy::TraceIdRatio(ratio) => Sampler::TraceIdRatioBased(*ratio),
+            SamplingStrategy::ParentBasedTraceIdRatio(ratio) => {
+                Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(*ratio)))
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Exporter settings
+// ============================================================================
+
+/// Settings for batch exporter behavior.
+#[derive(Debug, Clone)]
+pub struct BatchSettings {
+    /// Maximum number of spans/logs in a batch (default: 512)
+    pub max_queue_size: usize,
+    /// Maximum batch size before export (default: 512)
+    pub max_export_batch_size: usize,
+    /// Scheduled delay between exports (default: 5s)
+    pub scheduled_delay: Duration,
+    /// Maximum time to wait for export (default: 30s)
+    pub max_export_timeout: Duration,
+}
+
+impl Default for BatchSettings {
+    fn default() -> Self {
+        Self {
+            max_queue_size: 512,
+            max_export_batch_size: 512,
+            scheduled_delay: Duration::from_secs(5),
+            max_export_timeout: Duration::from_secs(30),
+        }
+    }
+}
+
+/// Settings for individual exporters.
+#[derive(Debug, Clone, Default)]
+pub struct ExporterSettings {
+    /// Enable logs export (default: true)
+    pub logs_enabled: bool,
+    /// Enable traces export (default: true)
+    pub traces_enabled: bool,
+    /// Enable metrics export (default: true)
+    pub metrics_enabled: bool,
+    /// HTTP request timeout (default: 10s)
+    pub timeout: Duration,
+}
+
+impl ExporterSettings {
+    fn new() -> Self {
+        Self {
+            logs_enabled: true,
+            traces_enabled: true,
+            metrics_enabled: true,
+            timeout: Duration::from_secs(10),
+        }
+    }
+}
+
+// ============================================================================
+// Metric view type alias
+// ============================================================================
+
+/// Type alias for a metric view function.
+///
+/// A view is a function that takes an instrument and optionally returns a modified stream
+/// configuration for that instrument. This is commonly used for customizing histogram buckets.
+pub type MetricView = Box<dyn Fn(&Instrument) -> Option<Stream> + Send + Sync + 'static>;
+
+// ============================================================================
+// Main configuration
+// ============================================================================
 
 /// Configuration for OpenTelemetry initialization.
 #[derive(Debug, Clone)]
@@ -70,53 +222,115 @@ pub struct OtelConfig {
     /// Deployment environment (e.g., "dev", "prod")
     pub environment: String,
     /// Log level for OTLP logger layer
-    pub logger_level: String,
+    pub logger_level: LogLevel,
     /// Log level for OTLP tracer layer
-    pub tracer_level: String,
+    pub tracer_level: LogLevel,
     /// Log level for stdout fmt layer
-    pub fmt_level: String,
+    pub fmt_level: LogLevel,
     /// Log level for file layer (None to disable file logging)
-    pub file_level: Option<String>,
+    pub file_level: Option<LogLevel>,
     /// Directory for log files (default: "logs")
     pub log_directory: String,
     /// Log file name prefix (default: "app.log")
     pub log_file_prefix: String,
     /// Additional filter directives (e.g., ["hyper=off", "sqlx::query=info"])
     pub filter_directives: Vec<String>,
-    /// Metrics export interval in seconds (default: 1)
-    pub metrics_interval_secs: u64,
+    /// Metrics export interval (default: 1s)
+    pub metrics_interval: Duration,
     /// Custom resource attributes (e.g., host.name, cloud.provider)
     pub resource_attributes: Vec<KeyValue>,
+    /// Transport protocol (HTTP or gRPC)
+    pub protocol: OtlpProtocol,
+    /// Sampling strategy for traces
+    pub sampling: SamplingStrategy,
+    /// Batch exporter settings
+    pub batch_settings: BatchSettings,
+    /// Exporter enable/disable settings
+    pub exporter_settings: ExporterSettings,
+
+    // Pre-computed URLs (internal)
+    logs_url: String,
+    traces_url: String,
+    metrics_url: String,
 }
 
 impl Default for OtelConfig {
     fn default() -> Self {
+        let endpoint = "http://localhost:4318".to_string();
         Self {
-            otlp_endpoint: "http://localhost:4318".to_string(),
+            logs_url: format!("{endpoint}/v1/logs"),
+            traces_url: format!("{endpoint}/v1/traces"),
+            metrics_url: format!("{endpoint}/v1/metrics"),
+            otlp_endpoint: endpoint,
             service_name: "unknown".to_string(),
             service_instance_id: "unknown".to_string(),
             service_version: "0.0.0".to_string(),
             environment: "dev".to_string(),
-            logger_level: "info".to_string(),
-            tracer_level: "info".to_string(),
-            fmt_level: "info".to_string(),
-            file_level: Some("debug".to_string()),
+            logger_level: LogLevel::Info,
+            tracer_level: LogLevel::Info,
+            fmt_level: LogLevel::Info,
+            file_level: Some(LogLevel::Debug),
             log_directory: "logs".to_string(),
             log_file_prefix: "app.log".to_string(),
             filter_directives: vec![],
-            metrics_interval_secs: 1,
+            metrics_interval: Duration::from_secs(1),
             resource_attributes: vec![],
+            protocol: OtlpProtocol::default(),
+            sampling: SamplingStrategy::default(),
+            batch_settings: BatchSettings::default(),
+            exporter_settings: ExporterSettings::new(),
         }
     }
 }
+
+impl OtelConfig {
+    /// Validate the configuration.
+    pub fn validate(&self) -> Result<(), OtelInitError> {
+        if self.service_name.is_empty() || self.service_name == "unknown" {
+            return Err(OtelInitError::Validation(
+                "service_name must be set to a meaningful value".to_string(),
+            ));
+        }
+
+        if self.otlp_endpoint.is_empty() {
+            return Err(OtelInitError::Validation(
+                "otlp_endpoint must not be empty".to_string(),
+            ));
+        }
+
+        if !self.otlp_endpoint.starts_with("http://") && !self.otlp_endpoint.starts_with("https://")
+        {
+            return Err(OtelInitError::Validation(format!(
+                "otlp_endpoint must start with http:// or https://, got: {}",
+                self.otlp_endpoint
+            )));
+        }
+
+        if let SamplingStrategy::TraceIdRatio(ratio)
+        | SamplingStrategy::ParentBasedTraceIdRatio(ratio) = self.sampling
+        {
+            if !(0.0..=1.0).contains(&ratio) {
+                return Err(OtelInitError::Validation(format!(
+                    "sampling ratio must be between 0.0 and 1.0, got: {ratio}"
+                )));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+// ============================================================================
+// OtelGuard
+// ============================================================================
 
 /// Guard that handles graceful shutdown of OTEL providers.
 ///
 /// Call `shutdown()` before application exit to flush pending telemetry.
 pub struct OtelGuard {
-    logger: SdkLoggerProvider,
-    tracer: SdkTracerProvider,
-    metrics: SdkMeterProvider,
+    logger: Option<SdkLoggerProvider>,
+    tracer: Option<SdkTracerProvider>,
+    metrics: Option<SdkMeterProvider>,
 }
 
 impl OtelGuard {
@@ -126,14 +340,20 @@ impl OtelGuard {
     }
 
     fn flush_all(&self) {
-        if let Err(e) = self.logger.force_flush() {
-            eprintln!("Logger flush error: {e:?}")
+        if let Some(ref logger) = self.logger {
+            if let Err(e) = logger.force_flush() {
+                eprintln!("Logger flush error: {e:?}")
+            }
         }
-        if let Err(e) = self.tracer.force_flush() {
-            eprintln!("Tracer flush error: {e:?}")
+        if let Some(ref tracer) = self.tracer {
+            if let Err(e) = tracer.force_flush() {
+                eprintln!("Tracer flush error: {e:?}")
+            }
         }
-        if let Err(e) = self.metrics.force_flush() {
-            eprintln!("Metrics flush error: {e:?}")
+        if let Some(ref metrics) = self.metrics {
+            if let Err(e) = metrics.force_flush() {
+                eprintln!("Metrics flush error: {e:?}")
+            }
         }
     }
 }
@@ -144,22 +364,36 @@ impl Drop for OtelGuard {
     }
 }
 
-fn build_resource(config: &OtelConfig) -> Resource {
+// ============================================================================
+// Internal helpers
+// ============================================================================
+
+fn build_resource(config: &mut OtelConfig) -> Resource {
     let mut attributes = vec![
-        KeyValue::new("service.instance.id", config.service_instance_id.clone()),
-        KeyValue::new("service.version", config.service_version.clone()),
-        KeyValue::new("deployment.environment", config.environment.clone()),
+        KeyValue::new(
+            "service.instance.id",
+            std::mem::take(&mut config.service_instance_id),
+        ),
+        KeyValue::new(
+            "service.version",
+            std::mem::take(&mut config.service_version),
+        ),
+        KeyValue::new(
+            "deployment.environment",
+            std::mem::take(&mut config.environment),
+        ),
     ];
-    attributes.extend(config.resource_attributes.clone());
+    attributes.append(&mut config.resource_attributes);
 
     Resource::builder()
-        .with_service_name(config.service_name.clone())
+        .with_service_name(std::mem::take(&mut config.service_name))
         .with_attributes(attributes)
         .build()
 }
 
-fn build_filter(level: &str, directives: &[String]) -> EnvFilter {
-    let mut filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
+fn build_filter(level: LogLevel, directives: &[String]) -> EnvFilter {
+    let mut filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level.as_str()));
 
     // Default directives to reduce noise from common crates
     let default_directives = [
@@ -190,52 +424,60 @@ fn build_filter(level: &str, directives: &[String]) -> EnvFilter {
     filter
 }
 
-fn init_otlp_logger(config: &OtelConfig) -> Result<SdkLoggerProvider, OtelInitError> {
-    let logs_url = format!("{}/v1/logs", config.otlp_endpoint);
+fn init_otlp_logger(
+    config: &OtelConfig,
+    resource: Resource,
+) -> Result<SdkLoggerProvider, OtelInitError> {
     let log_exporter = LogExporter::builder()
         .with_http()
-        .with_endpoint(logs_url)
+        .with_endpoint(&config.logs_url)
+        .with_timeout(config.exporter_settings.timeout)
         .build()
         .map_err(OtelInitError::LogExporter)?;
 
     Ok(SdkLoggerProvider::builder()
-        .with_resource(build_resource(config))
+        .with_resource(resource)
         .with_batch_exporter(log_exporter)
         .build())
 }
 
-fn init_otlp_tracer(config: &OtelConfig) -> Result<SdkTracerProvider, OtelInitError> {
-    let tracer_url = format!("{}/v1/traces", config.otlp_endpoint);
+fn init_otlp_tracer(
+    config: &OtelConfig,
+    resource: Resource,
+) -> Result<SdkTracerProvider, OtelInitError> {
     let trace_exporter = SpanExporter::builder()
         .with_http()
-        .with_endpoint(tracer_url)
+        .with_endpoint(&config.traces_url)
+        .with_timeout(config.exporter_settings.timeout)
         .build()
         .map_err(OtelInitError::TraceExporter)?;
 
     Ok(SdkTracerProvider::builder()
-        .with_resource(build_resource(config))
+        .with_resource(resource)
+        .with_sampler(config.sampling.to_sampler())
         .with_batch_exporter(trace_exporter)
         .build())
 }
 
 fn init_otlp_metrics(
     config: &OtelConfig,
+    resource: Resource,
     views: Vec<MetricView>,
 ) -> Result<SdkMeterProvider, OtelInitError> {
-    let metrics_url = format!("{}/v1/metrics", config.otlp_endpoint);
     let metrics_exporter = MetricExporter::builder()
         .with_http()
-        .with_endpoint(metrics_url)
+        .with_endpoint(&config.metrics_url)
+        .with_timeout(config.exporter_settings.timeout)
         .with_temporality(Temporality::Cumulative)
         .build()
         .map_err(OtelInitError::MetricsExporter)?;
 
     let reader = PeriodicReader::builder(metrics_exporter)
-        .with_interval(Duration::from_secs(config.metrics_interval_secs))
+        .with_interval(config.metrics_interval)
         .build();
 
     let mut provider_builder = SdkMeterProvider::builder()
-        .with_resource(build_resource(config))
+        .with_resource(resource)
         .with_reader(reader);
 
     for view in views {
@@ -245,12 +487,16 @@ fn init_otlp_metrics(
     Ok(provider_builder.build())
 }
 
+// ============================================================================
+// Public initialization functions
+// ============================================================================
+
 /// Initialize the tracing subscriber with OpenTelemetry integration.
 ///
 /// This sets up:
-/// - OTLP log exporter (logs to Loki/etc via OTLP)
-/// - OTLP trace exporter (traces to Tempo/Jaeger/etc via OTLP)
-/// - OTLP metrics exporter (metrics to Prometheus/etc via OTLP)
+/// - OTLP log exporter (logs to Loki/etc via OTLP) - if enabled
+/// - OTLP trace exporter (traces to Tempo/Jaeger/etc via OTLP) - if enabled
+/// - OTLP metrics exporter (metrics to Prometheus/etc via OTLP) - if enabled
 /// - Stdout fmt layer (colored console output)
 /// - Optional file layer (JSON logs to rotating files)
 /// - Error layer for SpanTrace support
@@ -269,64 +515,60 @@ pub fn init_tracing(config: OtelConfig) -> Result<OtelGuard, OtelInitError> {
 ///
 /// This is the same as [`init_tracing`] but allows you to pass custom metric views
 /// for customizing histogram bucket boundaries or other aggregation settings.
-///
-/// # Example
-/// ```ignore
-/// use tracing_otel_init::{OtelConfigBuilder, init_tracing_with_views, MetricView};
-/// use opentelemetry_sdk::metrics::{Aggregation, Instrument, Stream};
-///
-/// fn histogram_view(name: &'static str, buckets: &'static [f64]) -> MetricView {
-///     Box::new(move |i: &Instrument| {
-///         (i.name() == name).then(|| {
-///             Stream::builder()
-///                 .with_aggregation(Aggregation::ExplicitBucketHistogram {
-///                     boundaries: buckets.to_vec(),
-///                     record_min_max: false,
-///                 })
-///                 .build()
-///                 .expect("valid stream")
-///         })
-///     })
-/// }
-///
-/// const HTTP_BUCKETS: &[f64] = &[0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0];
-///
-/// let views = vec![
-///     histogram_view("http.client.duration", HTTP_BUCKETS),
-///     histogram_view("http.client.ttfb", HTTP_BUCKETS),
-/// ];
-///
-/// let config = OtelConfigBuilder::new()
-///     .service_name("my-service")
-///     .build();
-///
-/// let guard = init_tracing_with_views(config, views)?;
-/// ```
 pub fn init_tracing_with_views(
-    config: OtelConfig,
+    mut config: OtelConfig,
     metric_views: Vec<MetricView>,
 ) -> Result<OtelGuard, OtelInitError> {
+    // Validate configuration
+    config.validate()?;
+
+    // Build resource once and clone for each provider
+    let resource = build_resource(&mut config);
+
+    let mut guard = OtelGuard {
+        logger: None,
+        tracer: None,
+        metrics: None,
+    };
+
     // Logger (logs)
-    let otlp_logger_provider = init_otlp_logger(&config)?;
-    let otlp_logger_filter = build_filter(&config.logger_level, &config.filter_directives);
-    let otlp_logger_layer =
-        OtelTracingBridge::new(&otlp_logger_provider).with_filter(otlp_logger_filter);
+    let otlp_logger_layer = if config.exporter_settings.logs_enabled {
+        let otlp_logger_provider = init_otlp_logger(&config, resource.clone())?;
+        let otlp_logger_filter = build_filter(config.logger_level, &config.filter_directives);
+        let layer = OtelTracingBridge::new(&otlp_logger_provider).with_filter(otlp_logger_filter);
+        guard.logger = Some(otlp_logger_provider);
+        Some(layer)
+    } else {
+        None
+    };
 
     // Tracer (spans)
-    let otlp_tracer_provider = init_otlp_tracer(&config)?;
-    let otlp_tracer = otlp_tracer_provider.tracer("tracing-otel-subscriber");
-    let otlp_tracer_filter = build_filter(&config.tracer_level, &config.filter_directives);
-    let otlp_tracer_layer = OpenTelemetryLayer::new(otlp_tracer).with_filter(otlp_tracer_filter);
-    global::set_text_map_propagator(TraceContextPropagator::new());
+    let otlp_tracer_layer = if config.exporter_settings.traces_enabled {
+        let otlp_tracer_provider = init_otlp_tracer(&config, resource.clone())?;
+        let otlp_tracer = otlp_tracer_provider.tracer("tracing-otel-subscriber");
+        let otlp_tracer_filter = build_filter(config.tracer_level, &config.filter_directives);
+        let layer = OpenTelemetryLayer::new(otlp_tracer).with_filter(otlp_tracer_filter);
+        global::set_text_map_propagator(TraceContextPropagator::new());
+        guard.tracer = Some(otlp_tracer_provider);
+        Some(layer)
+    } else {
+        None
+    };
 
     // Metrics (with optional views)
-    let otlp_metrics_provider = init_otlp_metrics(&config, metric_views)?;
-    let otlp_metrics_layer = MetricsLayer::new(otlp_metrics_provider.clone());
-    global::set_meter_provider(otlp_metrics_provider.clone());
+    let otlp_metrics_layer = if config.exporter_settings.metrics_enabled {
+        let otlp_metrics_provider = init_otlp_metrics(&config, resource, metric_views)?;
+        let layer = MetricsLayer::new(otlp_metrics_provider.clone());
+        global::set_meter_provider(otlp_metrics_provider.clone());
+        guard.metrics = Some(otlp_metrics_provider);
+        Some(layer)
+    } else {
+        None
+    };
 
     // Stdout fmt layer
-    let fmt_filter = build_filter(&config.fmt_level, &config.filter_directives);
-    let fmt_layer = fmt::Layer::new()
+    let fmt_filter = build_filter(config.fmt_level, &config.filter_directives);
+    let fmt_layer = FmtLayer::new()
         .event_format(
             format()
                 .with_ansi(true)
@@ -351,10 +593,10 @@ pub fn init_tracing_with_views(
         .with(ErrorLayer::default());
 
     // Optionally add file layer
-    if let Some(ref file_level) = config.file_level {
+    if let Some(file_level) = config.file_level {
         let file_filter = build_filter(file_level, &config.filter_directives);
         let file_provider = rolling::daily(&config.log_directory, &config.log_file_prefix);
-        let file_layer = fmt::Layer::new()
+        let file_layer = FmtLayer::new()
             .with_writer(file_provider)
             .with_span_events(FmtSpan::CLOSE)
             .event_format(
@@ -372,12 +614,12 @@ pub fn init_tracing_with_views(
         subscriber.init();
     }
 
-    Ok(OtelGuard {
-        logger: otlp_logger_provider,
-        tracer: otlp_tracer_provider,
-        metrics: otlp_metrics_provider,
-    })
+    Ok(guard)
 }
+
+// ============================================================================
+// Builder
+// ============================================================================
 
 /// Builder for `OtelConfig` with a fluent API.
 #[derive(Debug, Clone, Default)]
@@ -390,8 +632,65 @@ impl OtelConfigBuilder {
         Self::default()
     }
 
+    /// Load configuration from environment variables.
+    ///
+    /// Supported variables:
+    /// - `OTEL_EXPORTER_OTLP_ENDPOINT` - OTLP endpoint URL
+    /// - `OTEL_SERVICE_NAME` - Service name
+    /// - `OTEL_SERVICE_VERSION` - Service version
+    /// - `OTEL_SERVICE_INSTANCE_ID` - Service instance ID
+    /// - `OTEL_ENVIRONMENT` or `DEPLOYMENT_ENVIRONMENT` - Environment name
+    /// - `OTEL_LOG_LEVEL` - Default log level for all layers
+    /// - `OTEL_TRACES_SAMPLER_ARG` - Sampling ratio (0.0-1.0) when using ratio sampler
+    pub fn from_env() -> Self {
+        let mut builder = Self::new();
+
+        if let Ok(endpoint) = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT") {
+            builder = builder.otlp_endpoint(endpoint);
+        }
+
+        if let Ok(name) = std::env::var("OTEL_SERVICE_NAME") {
+            builder = builder.service_name(name);
+        }
+
+        if let Ok(version) = std::env::var("OTEL_SERVICE_VERSION") {
+            builder = builder.service_version(version);
+        }
+
+        if let Ok(instance_id) = std::env::var("OTEL_SERVICE_INSTANCE_ID") {
+            builder = builder.service_instance_id(instance_id);
+        }
+
+        if let Ok(env) =
+            std::env::var("OTEL_ENVIRONMENT").or_else(|_| std::env::var("DEPLOYMENT_ENVIRONMENT"))
+        {
+            builder = builder.environment(env);
+        }
+
+        if let Ok(level_str) = std::env::var("OTEL_LOG_LEVEL") {
+            if let Ok(level) = level_str.parse::<LogLevel>() {
+                builder = builder
+                    .logger_level(level)
+                    .tracer_level(level)
+                    .fmt_level(level);
+            }
+        }
+
+        if let Ok(ratio_str) = std::env::var("OTEL_TRACES_SAMPLER_ARG") {
+            if let Ok(ratio) = ratio_str.parse::<f64>() {
+                builder = builder.sampling(SamplingStrategy::ParentBasedTraceIdRatio(ratio));
+            }
+        }
+
+        builder
+    }
+
     pub fn otlp_endpoint(mut self, endpoint: impl Into<String>) -> Self {
-        self.config.otlp_endpoint = endpoint.into();
+        let endpoint = endpoint.into();
+        self.config.logs_url = format!("{endpoint}/v1/logs");
+        self.config.traces_url = format!("{endpoint}/v1/traces");
+        self.config.metrics_url = format!("{endpoint}/v1/metrics");
+        self.config.otlp_endpoint = endpoint;
         self
     }
 
@@ -415,23 +714,29 @@ impl OtelConfigBuilder {
         self
     }
 
-    pub fn logger_level(mut self, level: impl Into<String>) -> Self {
-        self.config.logger_level = level.into();
+    pub fn logger_level(mut self, level: LogLevel) -> Self {
+        self.config.logger_level = level;
         self
     }
 
-    pub fn tracer_level(mut self, level: impl Into<String>) -> Self {
-        self.config.tracer_level = level.into();
+    pub fn tracer_level(mut self, level: LogLevel) -> Self {
+        self.config.tracer_level = level;
         self
     }
 
-    pub fn fmt_level(mut self, level: impl Into<String>) -> Self {
-        self.config.fmt_level = level.into();
+    pub fn fmt_level(mut self, level: LogLevel) -> Self {
+        self.config.fmt_level = level;
         self
     }
 
-    pub fn file_level(mut self, level: Option<impl Into<String>>) -> Self {
-        self.config.file_level = level.map(|l| l.into());
+    pub fn file_level(mut self, level: Option<LogLevel>) -> Self {
+        self.config.file_level = level;
+        self
+    }
+
+    /// Disable file logging.
+    pub fn disable_file_logging(mut self) -> Self {
+        self.config.file_level = None;
         self
     }
 
@@ -450,57 +755,115 @@ impl OtelConfigBuilder {
         self
     }
 
-    pub fn filter_directives(mut self, directives: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        self.config.filter_directives.extend(directives.into_iter().map(|d| d.into()));
+    pub fn filter_directives(
+        mut self,
+        directives: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.config
+            .filter_directives
+            .extend(directives.into_iter().map(|d| d.into()));
         self
     }
 
+    pub fn metrics_interval(mut self, interval: Duration) -> Self {
+        self.config.metrics_interval = interval;
+        self
+    }
+
+    /// Set metrics interval in seconds (convenience method).
     pub fn metrics_interval_secs(mut self, secs: u64) -> Self {
-        self.config.metrics_interval_secs = secs;
+        self.config.metrics_interval = Duration::from_secs(secs);
         self
     }
 
     /// Add a single custom resource attribute.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let config = OtelConfigBuilder::new()
-    ///     .service_name("my-service")
-    ///     .resource_attribute("host.name", "server-01")
-    ///     .resource_attribute("cloud.provider", "aws")
-    ///     .build();
-    /// ```
     pub fn resource_attribute(
         mut self,
         key: impl Into<opentelemetry::Key>,
         value: impl Into<opentelemetry::Value>,
     ) -> Self {
-        self.config.resource_attributes.push(KeyValue::new(key, value));
+        self.config
+            .resource_attributes
+            .push(KeyValue::new(key, value));
         self
     }
 
     /// Add multiple custom resource attributes at once.
-    ///
-    /// # Example
-    /// ```ignore
-    /// use opentelemetry::KeyValue;
-    ///
-    /// let config = OtelConfigBuilder::new()
-    ///     .service_name("my-service")
-    ///     .resource_attributes([
-    ///         KeyValue::new("host.name", "server-01"),
-    ///         KeyValue::new("cloud.provider", "aws"),
-    ///         KeyValue::new("cloud.region", "us-east-1"),
-    ///     ])
-    ///     .build();
-    /// ```
     pub fn resource_attributes(mut self, attrs: impl IntoIterator<Item = KeyValue>) -> Self {
         self.config.resource_attributes.extend(attrs);
         self
     }
 
+    /// Set the transport protocol.
+    pub fn protocol(mut self, protocol: OtlpProtocol) -> Self {
+        self.config.protocol = protocol;
+        self
+    }
+
+    /// Set the sampling strategy for traces.
+    pub fn sampling(mut self, strategy: SamplingStrategy) -> Self {
+        self.config.sampling = strategy;
+        self
+    }
+
+    /// Set a trace ID ratio sampler (convenience method).
+    pub fn sample_ratio(mut self, ratio: f64) -> Self {
+        self.config.sampling = SamplingStrategy::ParentBasedTraceIdRatio(ratio);
+        self
+    }
+
+    /// Configure batch exporter settings.
+    pub fn batch_settings(mut self, settings: BatchSettings) -> Self {
+        self.config.batch_settings = settings;
+        self
+    }
+
+    /// Set exporter timeout.
+    pub fn exporter_timeout(mut self, timeout: Duration) -> Self {
+        self.config.exporter_settings.timeout = timeout;
+        self
+    }
+
+    /// Enable or disable logs export.
+    pub fn logs_enabled(mut self, enabled: bool) -> Self {
+        self.config.exporter_settings.logs_enabled = enabled;
+        self
+    }
+
+    /// Enable or disable traces export.
+    pub fn traces_enabled(mut self, enabled: bool) -> Self {
+        self.config.exporter_settings.traces_enabled = enabled;
+        self
+    }
+
+    /// Enable or disable metrics export.
+    pub fn metrics_enabled(mut self, enabled: bool) -> Self {
+        self.config.exporter_settings.metrics_enabled = enabled;
+        self
+    }
+
+    /// Disable all OTLP exporters (logs, traces, metrics).
+    /// Useful for local development without a collector.
+    pub fn disable_otlp(mut self) -> Self {
+        self.config.exporter_settings.logs_enabled = false;
+        self.config.exporter_settings.traces_enabled = false;
+        self.config.exporter_settings.metrics_enabled = false;
+        self
+    }
+
+    /// Build the configuration.
+    ///
+    /// Note: Call `validate()` on the result or use `try_build()` to catch configuration errors
+    /// before calling `init_tracing()`.
     #[must_use]
     pub fn build(self) -> OtelConfig {
         self.config
+    }
+
+    /// Build and validate the configuration.
+    pub fn try_build(self) -> Result<OtelConfig, OtelInitError> {
+        let config = self.config;
+        config.validate()?;
+        Ok(config)
     }
 }

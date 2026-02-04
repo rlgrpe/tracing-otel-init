@@ -1,6 +1,6 @@
 [package]
 name = "tracing-otel-init"
-version = "0.1.4"
+version = "0.2.0"
 edition = "2021"
 description = "Opinionated OpenTelemetry tracing initialization with OTLP export"
 license = "MIT"
@@ -8,6 +8,7 @@ license = "MIT"
 [features]
 default = []
 rustls-tls = ["opentelemetry-otlp/reqwest-rustls"]
+grpc = ["opentelemetry-otlp/grpc-tonic"]
 
 [dependencies]
 tracing = { version = "0.1.41", features = ["log"] }
@@ -20,3 +21,6 @@ tracing-appender = "0.2.3"
 tracing-error = "0.2.1"
 tracing-panic = "0.1.2"
 thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
