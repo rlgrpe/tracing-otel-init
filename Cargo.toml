@@ -1,6 +1,6 @@
 [package]
 name = "tracing-otel-init"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Opinionated OpenTelemetry tracing initialization with OTLP export"
 license = "MIT"

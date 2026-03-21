@@ -21,7 +21,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag = "v0.2.0" }
+tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag = "v0.2.1" }
 tracing = "0.1"
 ```
 
@@ -29,14 +29,14 @@ tracing = "0.1"
 
 ```toml
 [dependencies]
-tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag = "v0.2.0", features = ["rustls-tls"] }
+tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag = "v0.2.1", features = ["rustls-tls"] }
 ```
 
 ### With gRPC transport
 
 ```toml
 [dependencies]
-tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag = "v0.2.0", features = ["grpc"] }
+tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag = "v0.2.1", features = ["grpc"] }
 ```
 
 ## Quick Start

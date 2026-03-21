@@ -23,7 +23,7 @@ What actually happened.
 ## Environment
 - Rust version: [e.g., 1.75]
 - OS: [e.g., Ubuntu 22.04, macOS 14]
-- tracing-otel-init version: [e.g., v0.2.0]
+- tracing-otel-init version: [e.g., v0.2.1]
 - OTLP collector: [e.g., OpenTelemetry Collector v0.96.0]
 
 ## Minimal Reproduction
