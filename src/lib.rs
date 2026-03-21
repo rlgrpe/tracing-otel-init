@@ -19,6 +19,7 @@ use tracing_appender::rolling;
 use tracing_error::ErrorLayer;
 use tracing_opentelemetry::{MetricsLayer, OpenTelemetryLayer};
 use tracing_panic::panic_hook;
+use tracing_subscriber::filter::{LevelFilter, Targets};
 use tracing_subscriber::fmt::format::{FmtSpan, JsonFields};
 use tracing_subscriber::fmt::time::ChronoUtc;
 use tracing_subscriber::fmt::{format, Layer as FmtLayer};
@@ -89,6 +90,19 @@ impl FromStr for LogLevel {
             "error" => Ok(LogLevel::Error),
             "off" => Ok(LogLevel::Off),
             _ => Err(format!("Invalid log level: {s}")),
+        }
+    }
+}
+
+impl From<LogLevel> for LevelFilter {
+    fn from(level: LogLevel) -> Self {
+        match level {
+            LogLevel::Trace => LevelFilter::TRACE,
+            LogLevel::Debug => LevelFilter::DEBUG,
+            LogLevel::Info => LevelFilter::INFO,
+            LogLevel::Warn => LevelFilter::WARN,
+            LogLevel::Error => LevelFilter::ERROR,
+            LogLevel::Off => LevelFilter::OFF,
         }
     }
 }
@@ -233,7 +247,12 @@ pub struct OtelConfig {
     pub log_directory: String,
     /// Log file name prefix (default: "app.log")
     pub log_file_prefix: String,
-    /// Additional filter directives (e.g., ["hyper=off", "sqlx::query=info"])
+    /// Additional filter directives (e.g., `["hyper=off", "sqlx::query=info"]`).
+    ///
+    /// OTLP layers only support `target=level` format. Console and file layers
+    /// additionally support bare levels (`"debug"`) and `EnvFilter` syntax
+    /// (`"my_crate[span_name]=debug"`). Unsupported directives are ignored
+    /// for OTLP layers with a warning on stderr.
     pub filter_directives: Vec<String>,
     /// Metrics export interval (default: 1s)
     pub metrics_interval: Duration,
@@ -391,11 +410,37 @@ fn build_resource(config: &mut OtelConfig) -> Resource {
         .build()
 }
 
-fn build_filter(level: LogLevel, directives: &[String]) -> EnvFilter {
+/// Build a stateless `Targets` filter for per-layer use (OTLP layers).
+///
+/// Unlike `EnvFilter`, `Targets` has no thread-local state, so it works
+/// correctly for spans that are created on one thread and closed on another.
+/// It also ignores `RUST_LOG`, ensuring configured levels are not silently overridden.
+fn build_targets_filter(level: LogLevel, directives: &[String]) -> Targets {
+    let default_level: LevelFilter = level.into();
+
+    let mut filter = Targets::new().with_default(default_level);
+
+    for directive in directives {
+        if let Some((target, lvl_str)) = directive.split_once('=') {
+            if let Ok(lvl) = lvl_str.parse::<LevelFilter>() {
+                filter = filter.with_target(target, lvl);
+            } else {
+                eprintln!("Invalid filter directive '{directive}': unknown level '{lvl_str}'");
+            }
+        } else {
+            eprintln!("Filter directive '{directive}' ignored for OTLP layer (expected 'target=level' format)");
+        }
+    }
+
+    filter
+}
+
+/// Build an `EnvFilter` for local layers (fmt, file) that benefit from
+/// `RUST_LOG` support and full directive syntax.
+fn build_fmt_filter(level: LogLevel, directives: &[String]) -> EnvFilter {
     let mut filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level.as_str()));
 
-    // Default directives to reduce noise from common crates
     let default_directives = [
         "opentelemetry_sdk=warn",
         "opentelemetry-otlp=warn",
@@ -534,7 +579,8 @@ pub fn init_tracing_with_views(
     // Logger (logs)
     let otlp_logger_layer = if config.exporter_settings.logs_enabled {
         let otlp_logger_provider = init_otlp_logger(&config, resource.clone())?;
-        let otlp_logger_filter = build_filter(config.logger_level, &config.filter_directives);
+        let otlp_logger_filter =
+            build_targets_filter(config.logger_level, &config.filter_directives);
         let layer = OtelTracingBridge::new(&otlp_logger_provider).with_filter(otlp_logger_filter);
         guard.logger = Some(otlp_logger_provider);
         Some(layer)
@@ -546,7 +592,8 @@ pub fn init_tracing_with_views(
     let otlp_tracer_layer = if config.exporter_settings.traces_enabled {
         let otlp_tracer_provider = init_otlp_tracer(&config, resource.clone())?;
         let otlp_tracer = otlp_tracer_provider.tracer("tracing-otel-subscriber");
-        let otlp_tracer_filter = build_filter(config.tracer_level, &config.filter_directives);
+        let otlp_tracer_filter =
+            build_targets_filter(config.tracer_level, &config.filter_directives);
         let layer = OpenTelemetryLayer::new(otlp_tracer).with_filter(otlp_tracer_filter);
         global::set_text_map_propagator(TraceContextPropagator::new());
         guard.tracer = Some(otlp_tracer_provider);
@@ -567,7 +614,7 @@ pub fn init_tracing_with_views(
     };
 
     // Stdout fmt layer
-    let fmt_filter = build_filter(config.fmt_level, &config.filter_directives);
+    let fmt_filter = build_fmt_filter(config.fmt_level, &config.filter_directives);
     let fmt_layer = FmtLayer::new()
         .event_format(
             format()
@@ -594,7 +641,7 @@ pub fn init_tracing_with_views(
 
     // Optionally add file layer
     if let Some(file_level) = config.file_level {
-        let file_filter = build_filter(file_level, &config.filter_directives);
+        let file_filter = build_fmt_filter(file_level, &config.filter_directives);
         let file_provider = rolling::daily(&config.log_directory, &config.log_file_prefix);
         let file_layer = FmtLayer::new()
             .with_writer(file_provider)
