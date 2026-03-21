@@ -94,6 +94,19 @@ impl FromStr for LogLevel {
     }
 }
 
+impl From<LogLevel> for LevelFilter {
+    fn from(level: LogLevel) -> Self {
+        match level {
+            LogLevel::Trace => LevelFilter::TRACE,
+            LogLevel::Debug => LevelFilter::DEBUG,
+            LogLevel::Info => LevelFilter::INFO,
+            LogLevel::Warn => LevelFilter::WARN,
+            LogLevel::Error => LevelFilter::ERROR,
+            LogLevel::Off => LevelFilter::OFF,
+        }
+    }
+}
+
 // ============================================================================
 // Transport protocol
 // ============================================================================
@@ -234,7 +247,12 @@ pub struct OtelConfig {
     pub log_directory: String,
     /// Log file name prefix (default: "app.log")
     pub log_file_prefix: String,
-    /// Additional filter directives (e.g., ["hyper=off", "sqlx::query=info"])
+    /// Additional filter directives (e.g., `["hyper=off", "sqlx::query=info"]`).
+    ///
+    /// OTLP layers only support `target=level` format. Console and file layers
+    /// additionally support bare levels (`"debug"`) and `EnvFilter` syntax
+    /// (`"my_crate[span_name]=debug"`). Unsupported directives are ignored
+    /// for OTLP layers with a warning on stderr.
     pub filter_directives: Vec<String>,
     /// Metrics export interval (default: 1s)
     pub metrics_interval: Duration,
@@ -398,7 +416,7 @@ fn build_resource(config: &mut OtelConfig) -> Resource {
 /// correctly for spans that are created on one thread and closed on another.
 /// It also ignores `RUST_LOG`, ensuring configured levels are not silently overridden.
 fn build_targets_filter(level: LogLevel, directives: &[String]) -> Targets {
-    let default_level: LevelFilter = level.as_str().parse().unwrap_or(LevelFilter::INFO);
+    let default_level: LevelFilter = level.into();
 
     let mut filter = Targets::new().with_default(default_level);
 
