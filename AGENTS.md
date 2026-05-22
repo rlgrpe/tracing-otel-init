@@ -72,8 +72,7 @@ cargo run --example selective_export
 
 ```
 src/
-├── lib.rs              # Main library: OtelConfig, OtelConfigBuilder, init_tracing
-└── tracing_bridge.rs   # OtelTracingBridge: tracing events → OTLP logs
+└── lib.rs              # Main library: OtelConfig, OtelConfigBuilder, init_tracing
 
 examples/
 ├── basic.rs            # Minimal setup
@@ -93,10 +92,11 @@ examples/
 - `LogLevel` - Log level enum (Trace, Debug, Info, Warn, Error, Off)
 - `SamplingStrategy` - Trace sampling configuration
 - `MetricView` - Custom metric view function type
-- `OtelTracingBridge` - tracing Layer for OTLP logs
+- `OtelTracingBridge` - re-export of opentelemetry-appender-tracing log layer
 
 ## Features
 
 - `default` - HTTP transport
+- `gzip-http` - Enable gzip compression for OTLP HTTP export
 - `rustls-tls` - Use rustls instead of native TLS
 - `grpc` - Enable gRPC transport
