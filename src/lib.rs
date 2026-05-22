@@ -1,7 +1,7 @@
-mod tracing_bridge;
-
 pub use opentelemetry::KeyValue;
-pub use tracing_bridge::OtelTracingBridge;
+pub use opentelemetry_appender_tracing::layer::{
+    OpenTelemetryTracingBridge as OtelTracingBridge, TracingSpanAttributes,
+};
 
 use opentelemetry::{global, trace::TracerProvider as _};
 use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter, WithExportConfig};
@@ -581,7 +581,10 @@ pub fn init_tracing_with_views(
         let otlp_logger_provider = init_otlp_logger(&config, resource.clone())?;
         let otlp_logger_filter =
             build_targets_filter(config.logger_level, &config.filter_directives);
-        let layer = OtelTracingBridge::new(&otlp_logger_provider).with_filter(otlp_logger_filter);
+        let layer = OtelTracingBridge::builder(&otlp_logger_provider)
+            .with_tracing_span_attributes(TracingSpanAttributes::all())
+            .build()
+            .with_filter(otlp_logger_filter);
         guard.logger = Some(otlp_logger_provider);
         Some(layer)
     } else {

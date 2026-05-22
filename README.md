@@ -11,7 +11,9 @@ Opinionated OpenTelemetry tracing initialization for Rust applications with OTLP
 - **File Logging** - Optional JSON logs with daily rotation
 - **Panic Capture** - Automatic panic tracing
 - **Span Context** - Log-trace correlation via trace_id/span_id
+- **Span Attributes** - Active `tracing` span fields copied onto OTLP log records
 - **Sampling** - Configurable trace sampling strategies
+- **HTTP Compression** - Optional gzip compression for OTLP HTTP export (via `gzip-http` feature)
 - **rustls TLS** - Optional pure Rust TLS implementation (via `rustls-tls` feature)
 - **gRPC Transport** - Optional gRPC transport (via `grpc` feature)
 
@@ -21,22 +23,29 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag = "v0.2.1" }
+tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag = "v0.2.2" }
 tracing = "0.1"
+```
+
+### With OTLP HTTP gzip compression
+
+```toml
+[dependencies]
+tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag = "v0.2.2", features = ["gzip-http"] }
 ```
 
 ### With rustls TLS
 
 ```toml
 [dependencies]
-tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag = "v0.2.1", features = ["rustls-tls"] }
+tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag = "v0.2.2", features = ["rustls-tls"] }
 ```
 
 ### With gRPC transport
 
 ```toml
 [dependencies]
-tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag = "v0.2.1", features = ["grpc"] }
+tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag = "v0.2.2", features = ["grpc"] }
 ```
 
 ## Quick Start
@@ -295,6 +304,7 @@ The guard also flushes on drop, but explicit `shutdown()` is recommended.
 │                    tracing Subscriber                        │
 ├─────────────────────────────────────────────────────────────┤
 │  OtelTracingBridge  │  Logs → OTLP /v1/logs                 │
+│  (otel appender)    │  + active span attributes             │
 │  OpenTelemetryLayer │  Traces → OTLP /v1/traces             │
 │  MetricsLayer       │  Metrics → OTLP /v1/metrics           │
 │  FmtLayer           │  Console (colored)                    │
