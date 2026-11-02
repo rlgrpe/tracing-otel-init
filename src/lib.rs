@@ -15,6 +15,7 @@ use opentelemetry_sdk::Resource;
 use std::fmt;
 use std::str::FromStr;
 use std::time::Duration;
+use tracing_appender::non_blocking::{NonBlockingBuilder, WorkerGuard};
 use tracing_appender::rolling;
 use tracing_error::ErrorLayer;
 use tracing_opentelemetry::{MetricsLayer, OpenTelemetryLayer};
@@ -343,17 +344,25 @@ impl OtelConfig {
 // OtelGuard
 // ============================================================================
 
-/// Guard that handles graceful shutdown of OTEL providers.
+/// Guard that flushes OTLP providers and owns the buffered stdout worker.
 ///
-/// Call `shutdown()` before application exit to flush pending telemetry.
+/// Keep this guard alive until all logging has finished. Dropping it flushes OTLP
+/// first, then drops the stdout worker guard to drain queued output. The worker
+/// uses tracing-appender's shutdown timeouts, so a stalled stdout sink can still
+/// lose queued output at exit. Process termination without dropping the guard
+/// does not drain stdout.
 pub struct OtelGuard {
     logger: Option<SdkLoggerProvider>,
     tracer: Option<SdkTracerProvider>,
     metrics: Option<SdkMeterProvider>,
+    _stdout_guard: Option<WorkerGuard>,
 }
 
 impl OtelGuard {
-    /// Flushes all pending telemetry data.
+    /// Flushes pending OTLP telemetry without stopping or draining stdout.
+    ///
+    /// Drop this guard after all logging has finished to drain queued stdout,
+    /// subject to tracing-appender's worker shutdown timeouts.
     pub fn shutdown(&self) {
         self.flush_all();
     }
@@ -380,6 +389,7 @@ impl OtelGuard {
 impl Drop for OtelGuard {
     fn drop(&mut self) {
         self.flush_all();
+        // Fields drop after this method, keeping stdout alive during OTLP flush.
     }
 }
 
@@ -548,7 +558,8 @@ fn init_otlp_metrics(
 /// - Panic hook for tracing panics
 ///
 /// Returns an `OtelGuard` that should be kept alive for the application lifetime.
-/// Call `guard.shutdown()` before exit to flush pending telemetry.
+/// `guard.shutdown()` flushes OTLP; drop the guard before exit to drain stdout
+/// subject to tracing-appender's worker shutdown timeouts.
 ///
 /// For custom histogram bucket boundaries or other metric views, use
 /// [`init_tracing_with_views`] instead.
@@ -574,6 +585,7 @@ pub fn init_tracing_with_views(
         logger: None,
         tracer: None,
         metrics: None,
+        _stdout_guard: None,
     };
 
     // Logger (logs)
@@ -617,8 +629,15 @@ pub fn init_tracing_with_views(
     };
 
     // Stdout fmt layer
+    let (stdout_writer, stdout_guard) = NonBlockingBuilder::default()
+        .buffered_lines_limit(8192)
+        .lossy(false)
+        .thread_name("stdout-log-writer")
+        .finish(std::io::stdout());
+    guard._stdout_guard = Some(stdout_guard);
     let fmt_filter = build_fmt_filter(config.fmt_level, &config.filter_directives);
     let fmt_layer = FmtLayer::new()
+        .with_writer(stdout_writer)
         .event_format(
             format()
                 .with_ansi(true)

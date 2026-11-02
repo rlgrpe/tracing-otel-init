@@ -7,7 +7,7 @@ Opinionated OpenTelemetry tracing initialization for Rust applications with OTLP
 - **OTLP Logs** - Export logs via OpenTelemetry Protocol to Loki, Elasticsearch, etc.
 - **OTLP Traces** - Export distributed traces to Tempo, Jaeger, etc.
 - **OTLP Metrics** - Export metrics to Prometheus, etc.
-- **Console Output** - Colored, formatted stdout logging
+- **Console Output** - Colored, formatted stdout logging through a dedicated writer thread
 - **File Logging** - Optional JSON logs with daily rotation
 - **Panic Capture** - Automatic panic tracing
 - **Span Context** - Log-trace correlation via trace_id/span_id
@@ -23,7 +23,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag = "v0.2.2" }
+tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag = "v0.2.3" }
 tracing = "0.1"
 ```
 
@@ -31,21 +31,21 @@ tracing = "0.1"
 
 ```toml
 [dependencies]
-tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag = "v0.2.2", features = ["gzip-http"] }
+tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag = "v0.2.3", features = ["gzip-http"] }
 ```
 
 ### With rustls TLS
 
 ```toml
 [dependencies]
-tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag = "v0.2.2", features = ["rustls-tls"] }
+tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag = "v0.2.3", features = ["rustls-tls"] }
 ```
 
 ### With gRPC transport
 
 ```toml
 [dependencies]
-tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag = "v0.2.2", features = ["grpc"] }
+tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag = "v0.2.3", features = ["grpc"] }
 ```
 
 ## Quick Start
@@ -284,18 +284,23 @@ Validation checks:
 
 ## OtelGuard
 
-The `init_tracing` function returns an `OtelGuard` that manages the lifecycle of OpenTelemetry providers. Keep it alive for the duration of your application.
+The `init_tracing` function returns an `OtelGuard` that owns the OpenTelemetry providers and stdout writer thread. Keep it alive until all application logging has finished.
 
 ```rust
 let guard = init_tracing(config)?;
 
 // ... application runs ...
 
-// Flush pending telemetry before exit
+// Flush pending OTLP telemetry, then drain stdout after the final log.
 guard.shutdown();
+drop(guard);
 ```
 
-The guard also flushes on drop, but explicit `shutdown()` is recommended.
+`shutdown()` flushes OTLP providers without stopping or draining stdout. Dropping the guard flushes OTLP again, then drops the standard `tracing-appender::non_blocking::WorkerGuard` to drain queued console output.
+
+Console output uses an 8192-message bounded queue with `lossy(false)`. Formatting stays on the calling thread; stdout I/O runs on the writer thread. A full queue blocks producers rather than discarding messages. File logging and OTLP exporters are unchanged.
+
+Draining uses `tracing-appender`'s shutdown timeouts, so a stalled stdout sink can still lose queued output at exit. Abrupt termination such as `process::exit` or `SIGKILL` bypasses the guard and cannot drain the queue.
 
 ## Architecture
 
@@ -307,7 +312,7 @@ The guard also flushes on drop, but explicit `shutdown()` is recommended.
 │  (otel appender)    │  + active span attributes             │
 │  OpenTelemetryLayer │  Traces → OTLP /v1/traces             │
 │  MetricsLayer       │  Metrics → OTLP /v1/metrics           │
-│  FmtLayer           │  Console (colored)                    │
+│  FmtLayer           │  Queue → stdout writer (colored)      │
 │  FmtLayer (file)    │  JSON → logs/app.log.YYYY-MM-DD       │
 │  ErrorLayer         │  SpanTrace support                    │
 └─────────────────────────────────────────────────────────────┘
