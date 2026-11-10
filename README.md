@@ -23,7 +23,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag = "v0.2.3" }
+tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag = "v0.2.4" }
 tracing = "0.1"
 ```
 
@@ -31,21 +31,21 @@ tracing = "0.1"
 
 ```toml
 [dependencies]
-tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag = "v0.2.3", features = ["gzip-http"] }
+tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag = "v0.2.4", features = ["gzip-http"] }
 ```
 
 ### With rustls TLS
 
 ```toml
 [dependencies]
-tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag = "v0.2.3", features = ["rustls-tls"] }
+tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag = "v0.2.4", features = ["rustls-tls"] }
 ```
 
 ### With gRPC transport
 
 ```toml
 [dependencies]
-tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag = "v0.2.3", features = ["grpc"] }
+tracing-otel-init = { git = "https://github.com/rlgrpe/tracing-otel-init", tag = "v0.2.4", features = ["grpc"] }
 ```
 
 ## Quick Start
@@ -261,6 +261,30 @@ let config = OtelConfigBuilder::new()
 let guard = init_tracing_with_views(config, views)?;
 ```
 
+### Extra Layers
+
+Use `init_tracing_with_views_and_layers` to install your own layers in the global subscriber, for example a layer that turns a dependency's events into metrics:
+
+```rust
+use tracing_otel_init::{init_tracing_with_views_and_layers, ExtraLayer, OtelConfigBuilder};
+use tracing_subscriber::filter::{LevelFilter, Targets};
+use tracing_subscriber::Layer;
+
+let acquire_metrics: ExtraLayer = Box::new(
+    MyAcquireLayer.with_filter(Targets::new().with_target("sqlx::pool::acquire", LevelFilter::TRACE)),
+);
+
+let config = OtelConfigBuilder::new()
+    .service_name("my-service")
+    // Keep the built-in layers at their usual level for the same target.
+    .filter_directive("sqlx::pool::acquire=warn")
+    .build();
+
+let guard = init_tracing_with_views_and_layers(config, views, vec![acquire_metrics])?;
+```
+
+Every layer has its own filter and there is no global filter. An extra layer receives what its filter admits, even below the configured levels. The built-in OTLP, stdout and file layers keep their own filters, so an extra layer never changes what they emit. Pair a verbose extra-layer filter with a `filter_directive` for the same target, as above, if the built-in layers must not pick those events up.
+
 ### Configuration Validation
 
 ```rust
@@ -308,6 +332,7 @@ Draining uses `tracing-appender`'s shutdown timeouts, so a stalled stdout sink c
 ┌─────────────────────────────────────────────────────────────┐
 │                    tracing Subscriber                        │
 ├─────────────────────────────────────────────────────────────┤
+│  ExtraLayer(s)      │  Caller layers, own filters (optional)│
 │  OtelTracingBridge  │  Logs → OTLP /v1/logs                 │
 │  (otel appender)    │  + active span attributes             │
 │  OpenTelemetryLayer │  Traces → OTLP /v1/traces             │

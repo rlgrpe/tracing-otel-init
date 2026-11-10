@@ -92,6 +92,7 @@ examples/
 - `LogLevel` - Log level enum (Trace, Debug, Info, Warn, Error, Off)
 - `SamplingStrategy` - Trace sampling configuration
 - `MetricView` - Custom metric view function type
+- `ExtraLayer` - Boxed caller layer for `init_tracing_with_views_and_layers`
 - `OtelTracingBridge` - re-export of opentelemetry-appender-tracing log layer
 
 ## Features
