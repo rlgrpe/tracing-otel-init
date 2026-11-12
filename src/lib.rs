@@ -26,7 +26,7 @@ use tracing_subscriber::fmt::time::ChronoUtc;
 use tracing_subscriber::fmt::{format, Layer as FmtLayer};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::{registry, EnvFilter, Layer};
+use tracing_subscriber::{registry, EnvFilter, Layer, Registry};
 
 // ============================================================================
 // Error types
@@ -218,6 +218,14 @@ impl ExporterSettings {
 /// A view is a function that takes an instrument and optionally returns a modified stream
 /// configuration for that instrument. This is commonly used for customizing histogram buckets.
 pub type MetricView = Box<dyn Fn(&Instrument) -> Option<Stream> + Send + Sync + 'static>;
+
+/// A caller-supplied tracing layer installed beside the built-in layers.
+///
+/// Give each layer its own per-layer filter (`Layer::with_filter`). There is no
+/// global filter: an extra layer receives what its filter admits even below the
+/// configured levels, and the built-in OTLP, stdout and file layers keep their
+/// own filters, so an extra layer never changes what they emit.
+pub type ExtraLayer = Box<dyn Layer<Registry> + Send + Sync + 'static>;
 
 // ============================================================================
 // Main configuration
@@ -572,8 +580,21 @@ pub fn init_tracing(config: OtelConfig) -> Result<OtelGuard, OtelInitError> {
 /// This is the same as [`init_tracing`] but allows you to pass custom metric views
 /// for customizing histogram bucket boundaries or other aggregation settings.
 pub fn init_tracing_with_views(
+    config: OtelConfig,
+    metric_views: Vec<MetricView>,
+) -> Result<OtelGuard, OtelInitError> {
+    init_tracing_with_views_and_layers(config, metric_views, Vec::new())
+}
+
+/// Initialize the tracing subscriber with custom metric views and extra layers.
+///
+/// This is the same as [`init_tracing_with_views`] and additionally installs
+/// `extra_layers` in the global subscriber, for example a layer that turns a
+/// dependency's events into metrics. See [`ExtraLayer`] for how filtering works.
+pub fn init_tracing_with_views_and_layers(
     mut config: OtelConfig,
     metric_views: Vec<MetricView>,
+    extra_layers: Vec<ExtraLayer>,
 ) -> Result<OtelGuard, OtelInitError> {
     // Validate configuration
     config.validate()?;
@@ -655,6 +676,7 @@ pub fn init_tracing_with_views(
 
     // Build the subscriber
     let subscriber = registry()
+        .with(extra_layers)
         .with(otlp_logger_layer)
         .with(otlp_tracer_layer)
         .with(otlp_metrics_layer)
