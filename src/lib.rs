@@ -1,7 +1,7 @@
 pub use opentelemetry::KeyValue;
-pub use opentelemetry_appender_tracing::layer::{
-    OpenTelemetryTracingBridge as OtelTracingBridge, TracingSpanAttributes,
-};
+mod log_bridge;
+
+pub use log_bridge::{OpenTelemetryTracingBridge as OtelTracingBridge, TracingSpanAttributes};
 
 use opentelemetry::{global, trace::TracerProvider as _};
 use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter, WithExportConfig};

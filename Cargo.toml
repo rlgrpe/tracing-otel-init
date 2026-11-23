@@ -1,6 +1,6 @@
 [package]
 name = "tracing-otel-init"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2021"
 description = "Opinionated OpenTelemetry tracing initialization with OTLP export"
 license = "MIT"
@@ -35,9 +35,6 @@ opentelemetry_sdk = { version = "0.32.0", features = [
   "logs",
   "metrics",
   "spec_unstable_metrics_views",
-] }
-opentelemetry-appender-tracing = { version = "0.32.0", features = [
-  "experimental_span_attributes",
 ] }
 tracing-appender = "0.2.5"
 tracing-error = "0.2.1"
